@@ -11,9 +11,28 @@ const PORT = Number(process.env.PORT) || 3000;
 app.use(express.json({ limit: '256kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-/** 校验并规范化 { scenes, constraints }，返回 { errors, scenes, constraints } */
+/** 校验并规范化 { mode, timeLimit, scenes, constraints }，返回 { errors, mode, timeLimit, scenes, constraints } */
 function validatePayload(body) {
   const errors = [];
+  const rawMode = body && body.mode;
+  if (rawMode !== undefined && rawMode !== 'classic' && rawMode !== 'timed') {
+    errors.push(`未知的编排模式：${String(rawMode)}`);
+  }
+  const mode = rawMode === 'timed' ? 'timed' : 'classic';
+
+  // 整场时长上限（仅 timed 模式使用）
+  let timeLimit = Number(body && body.timeLimit);
+  if (mode === 'timed') {
+    if (!Number.isFinite(timeLimit) || !Number.isInteger(timeLimit) || timeLimit <= 0) {
+      errors.push('整场时长上限必须是正整数（分钟）');
+      timeLimit = 0;
+    }
+  } else if (Number.isFinite(timeLimit) && timeLimit >= 0) {
+    timeLimit = timeLimit;
+  } else {
+    timeLimit = 0;
+  }
+
   const rawScenes = body && body.scenes;
   if (!Array.isArray(rawScenes) || rawScenes.length === 0) {
     errors.push('至少需要 1 个场景');
@@ -28,7 +47,20 @@ function validatePayload(body) {
       if (!name) errors.push(`第 ${i + 1} 个场景缺少名称`);
       if (ids.has(id)) errors.push(`场景 id 重复：${id}`);
       ids.add(id);
-      scenes.push({ id, name, props: normalizeProps(s && s.props) });
+
+      const scene = { id, name, props: normalizeProps(s && s.props) };
+      if (mode === 'timed') {
+        const duration = Number(s && s.duration);
+        if (!Number.isFinite(duration) || !Number.isInteger(duration) || duration < 0) {
+          errors.push(`场景「${name || id}」的时长必须是非负整数（分钟）`);
+        } else {
+          scene.duration = duration;
+        }
+        scene.required = !!(s && s.required);
+        const value = Number(s && s.value);
+        scene.value = (!scene.required && Number.isFinite(value) && value > 0) ? Math.floor(value) : 0;
+      }
+      scenes.push(scene);
     });
   }
 
@@ -65,15 +97,21 @@ function validatePayload(body) {
     forbiddenAdjacencies.push({ a: f.a, b: f.b });
   }
 
-  return { errors, scenes, constraints: { dependencies, fixedPositions, forbiddenAdjacencies } };
+  return {
+    errors,
+    mode,
+    timeLimit,
+    scenes,
+    constraints: { dependencies, fixedPositions, forbiddenAdjacencies },
+  };
 }
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 app.post('/api/solve', (req, res) => {
-  const { errors, scenes, constraints } = validatePayload(req.body);
+  const { errors, mode, timeLimit, scenes, constraints } = validatePayload(req.body);
   if (errors.length) return res.status(400).json({ ok: false, errors });
-  res.json(solve(scenes, constraints));
+  res.json(solve(scenes, constraints, { mode, timeLimit }));
 });
 
 app.get('/api/plans', (req, res) => {
@@ -83,9 +121,9 @@ app.get('/api/plans', (req, res) => {
 app.post('/api/plans', (req, res) => {
   const name = String((req.body && req.body.name) || '').trim();
   if (!name) return res.status(400).json({ ok: false, errors: ['方案名称不能为空'] });
-  const { errors, scenes, constraints } = validatePayload(req.body);
+  const { errors, mode, timeLimit, scenes, constraints } = validatePayload(req.body);
   if (errors.length) return res.status(400).json({ ok: false, errors });
-  const plan = store.create({ name, scenes, constraints });
+  const plan = store.create({ name, mode, timeLimit, scenes, constraints });
   res.status(201).json({ ok: true, plan });
 });
 
@@ -98,9 +136,9 @@ app.get('/api/plans/:id', (req, res) => {
 app.put('/api/plans/:id', (req, res) => {
   const name = String((req.body && req.body.name) || '').trim();
   if (!name) return res.status(400).json({ ok: false, errors: ['方案名称不能为空'] });
-  const { errors, scenes, constraints } = validatePayload(req.body);
+  const { errors, mode, timeLimit, scenes, constraints } = validatePayload(req.body);
   if (errors.length) return res.status(400).json({ ok: false, errors });
-  const plan = store.update(req.params.id, { name, scenes, constraints });
+  const plan = store.update(req.params.id, { name, mode, timeLimit, scenes, constraints });
   if (!plan) return res.status(404).json({ ok: false, errors: ['方案不存在'] });
   res.json({ ok: true, plan });
 });

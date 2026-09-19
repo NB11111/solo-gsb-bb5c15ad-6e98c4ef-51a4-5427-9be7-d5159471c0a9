@@ -76,6 +76,47 @@ thead th { color: var(--muted); font-size: 13px; border-bottom: 1px solid var(--
 tbody tr + tr td { border-top: 1px solid var(--border); }
 .col-idx { width: 36px; }
 .col-op { width: 70px; }
+.col-dur { width: 92px; }
+.col-req { width: 56px; text-align: center; }
+.col-val { width: 104px; }
+.scene-duration { width: 80px; }
+.scene-value { width: 92px; }
+.scene-required { width: 18px; height: 18px; vertical-align: middle; }
+
+.mode-switch {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+.mode-opt {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex: 1 1 280px;
+  background: var(--card-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+  cursor: pointer;
+}
+.mode-opt input { margin-top: 4px; }
+.mode-opt span { display: flex; flex-direction: column; }
+.mode-opt em { color: var(--muted); font-style: normal; font-size: 12.5px; }
+
+.timed-settings {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  background: var(--card-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+}
+.timed-settings #time-limit { width: 90px; }
+.hint-over { color: #ff9d9a; font-weight: bold; }
 
 input[type="text"], input[type="number"], select {
   background: var(--bg);
@@ -144,7 +185,36 @@ input[type="number"] { width: 70px; }
   padding: 6px 16px;
   font-weight: bold;
 }
+.order-chip-req { background: #6d4a3a; border: 1px solid var(--accent); }
 .order-arrow { color: var(--muted); }
+
+.timed-summary {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+  background: var(--card-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin: 10px 0 14px;
+  font-size: 15px;
+}
+.timed-summary strong { color: var(--accent); font-size: 18px; margin: 0 2px; }
+
+.scene-pick { margin: 6px 0 14px; }
+.scene-pick h3 { margin: 0 0 6px; font-size: 15px; }
+.pick-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+.pick-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  background: var(--card-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-size: 14px;
+}
+.pick-out .pick-list li { opacity: 0.72; text-decoration: line-through; }
 
 .total-line {
   font-size: 16px;
