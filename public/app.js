@@ -7,15 +7,18 @@ const uid = () => `s${Date.now().toString(36)}_${uidCounter++}`;
 
 const state = {
   planId: null,
-  scenes: [], // { id, name, props: [] }
+  scenes: [], // { id, name, props: [], duration, required, value }
   constraints: { dependencies: [], fixedPositions: [], forbiddenAdjacencies: [] },
+  options: { mode: 'standard', timeLimit: 60 },
 };
 
 const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 const sceneName = (id) => {
   const s = state.scenes.find(x => x.id === id);
   return s ? s.name : '（已删除）';
 };
+const isLimited = () => state.options.mode === 'limited';
 
 /* ================= 场景编辑 ================= */
 function renderScenes() {
@@ -50,6 +53,41 @@ function renderScenes() {
     });
     tdProps.appendChild(propsInput);
 
+    const tdDuration = document.createElement('td');
+    const durInput = document.createElement('input');
+    durInput.type = 'number';
+    durInput.className = 'scene-duration';
+    durInput.min = '0';
+    durInput.step = '1';
+    durInput.value = s.duration ?? 0;
+    durInput.addEventListener('input', () => {
+      const v = Number(durInput.value);
+      s.duration = Number.isFinite(v) && v >= 0 ? v : 0;
+    });
+    tdDuration.appendChild(durInput);
+
+    const tdRequired = document.createElement('td');
+    const reqInput = document.createElement('input');
+    reqInput.type = 'checkbox';
+    reqInput.className = 'scene-required';
+    reqInput.checked = Boolean(s.required);
+    reqInput.title = '必演场景（时长受限编排时必须入选）';
+    reqInput.addEventListener('change', () => { s.required = reqInput.checked; });
+    tdRequired.appendChild(reqInput);
+
+    const tdValue = document.createElement('td');
+    const valInput = document.createElement('input');
+    valInput.type = 'number';
+    valInput.className = 'scene-value';
+    valInput.min = '0';
+    valInput.step = '1';
+    valInput.value = s.value ?? 0;
+    valInput.addEventListener('input', () => {
+      const v = Number(valInput.value);
+      s.value = Number.isFinite(v) && v >= 0 ? v : 0;
+    });
+    tdValue.appendChild(valInput);
+
     const tdOp = document.createElement('td');
     const del = document.createElement('button');
     del.className = 'btn btn-sm btn-danger';
@@ -65,12 +103,20 @@ function renderScenes() {
     });
     tdOp.appendChild(del);
 
-    tr.append(tdIdx, tdName, tdProps, tdOp);
+    tr.append(tdIdx, tdName, tdProps, tdDuration, tdRequired, tdValue, tdOp);
     tbody.appendChild(tr);
   });
 
   $('#scene-count').textContent = `共 ${state.scenes.length} / ${MAX_SCENES} 个场景`;
   $('#btn-add-scene').disabled = state.scenes.length >= MAX_SCENES;
+  renderModeUI();
+}
+
+/* ================= 模式切换 ================= */
+function renderModeUI() {
+  $$('input[name="mode"]').forEach(r => { r.checked = r.value === state.options.mode; });
+  $('#mode-limit').hidden = !isLimited();
+  $('#time-limit').value = state.options.timeLimit ?? 60;
 }
 
 /* ================= 约束编辑 ================= */
@@ -145,8 +191,18 @@ function renderAll() {
 /* ================= 求解 ================= */
 function payload() {
   return {
-    scenes: state.scenes.map(s => ({ id: s.id, name: s.name.trim(), props: s.props })),
+    scenes: state.scenes.map(s => ({
+      id: s.id,
+      name: s.name.trim(),
+      props: s.props,
+      duration: Number(s.duration) || 0,
+      required: Boolean(s.required),
+      value: Number(s.value) || 0,
+    })),
     constraints: state.constraints,
+    options: isLimited()
+      ? { mode: 'limited', timeLimit: Number(state.options.timeLimit) || 0 }
+      : { mode: 'standard' },
   };
 }
 
@@ -177,10 +233,10 @@ async function doSolve() {
     return;
   }
   if (!data.ok) {
-    box.appendChild(conflictBlock(data.conflict));
+    box.appendChild(unsolvableBlock(data));
     return;
   }
-  box.appendChild(resultBlock(data));
+  box.appendChild(data.mode === 'limited' ? limitedResultBlock(data) : resultBlock(data));
   $('#result-card').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
@@ -215,6 +271,180 @@ function conflictBlock(conflict) {
   }
   div.append(h, p, ul);
   return div;
+}
+
+/** 统一无解展示：标准模式的 conflict，或时长受限模式的 reason/message/conflict。 */
+function unsolvableBlock(data) {
+  if (data.reason === 'required-overtime') {
+    const div = document.createElement('div');
+    div.className = 'conflict-box';
+    const h = document.createElement('h3');
+    h.textContent = '⏱ 无解：必演场景已超时';
+    const p = document.createElement('p');
+    p.textContent = data.message;
+    const detail = document.createElement('p');
+    detail.className = 'time-summary';
+    detail.innerHTML = `必演总时长 <strong>${data.requiredDuration}</strong> ／ 上限 <strong>${data.timeLimit}</strong>`;
+    div.append(h, p, detail);
+    return div;
+  }
+  if (data.reason === 'no-feasible-arrangement') {
+    const div = document.createElement('div');
+    div.className = 'conflict-box';
+    const h = document.createElement('h3');
+    h.textContent = '⚠ 无解：没有可行编排';
+    const p = document.createElement('p');
+    p.textContent = data.message;
+    div.append(h, p);
+    const items = [];
+    if (data.conflict) {
+      if (data.conflict.text) items.push(data.conflict.text);
+      else if (Array.isArray(data.conflict.constraints)) {
+        for (const c of data.conflict.constraints) items.push(c.text);
+      }
+    }
+    if (items.length) {
+      const ul = document.createElement('ul');
+      for (const text of items) {
+        const li = document.createElement('li');
+        li.textContent = text;
+        ul.appendChild(li);
+      }
+      div.appendChild(ul);
+    }
+    return div;
+  }
+  return conflictBlock(data.conflict);
+}
+
+/** 场景标签（必演/可选） */
+function sceneTag(id) {
+  const s = state.scenes.find(x => x.id === id);
+  const tag = document.createElement('span');
+  tag.className = s && s.required ? 'tag tag-required' : 'tag tag-optional';
+  tag.textContent = s && s.required ? '必演' : '可选';
+  return tag;
+}
+
+function limitedResultBlock(data) {
+  const frag = document.createDocumentFragment();
+
+  // 时长与价值汇总
+  const summary = document.createElement('div');
+  summary.className = 'time-summary';
+  const remainCls = data.remainingDuration > 0 ? 'time-ok' : 'time-zero';
+  summary.innerHTML =
+    `已用时长 <strong>${data.usedDuration}</strong> ／ 上限 <strong>${data.timeLimit}</strong>` +
+    `　｜　剩余时长 <strong class="${remainCls}">${data.remainingDuration}</strong>` +
+    `　｜　入选可选价值总和 <strong>${data.totalValue}</strong>` +
+    `　｜　道具增减总次数 <strong>${data.totalCost}</strong>`;
+  frag.appendChild(summary);
+
+  // 入选 / 舍弃
+  const picks = document.createElement('div');
+  picks.className = 'picks';
+
+  const sel = document.createElement('div');
+  sel.className = 'picks-col';
+  const selHead = document.createElement('h3');
+  selHead.textContent = `✅ 入选场景（${data.selectedScenes.length}）`;
+  sel.appendChild(selHead);
+  const selUl = document.createElement('ul');
+  selUl.className = 'pick-list';
+  data.selectedScenes.forEach((id, i) => {
+    const li = document.createElement('li');
+    const s = state.scenes.find(x => x.id === id);
+    li.innerHTML = `<span class="pick-pos">第 ${i + 1} 位</span> ${escapeHtml(sceneName(id))}` +
+      `　<span class="hint">时长 ${s ? s.duration : ''}${s && !s.required ? `，价值 ${s.value}` : ''}</span>`;
+    li.appendChild(sceneTag(id));
+    selUl.appendChild(li);
+  });
+  sel.appendChild(selUl);
+
+  const drop = document.createElement('div');
+  drop.className = 'picks-col';
+  const dropHead = document.createElement('h3');
+  dropHead.append(`🚫 舍弃场景（${data.discardedScenes.length}）　`);
+  const dropHint = document.createElement('span');
+  dropHint.className = 'hint';
+  dropHint.textContent = '不参与约束与编排';
+  dropHead.appendChild(dropHint);
+  drop.appendChild(dropHead);
+  const dropUl = document.createElement('ul');
+  dropUl.className = 'pick-list';
+  if (!data.discardedScenes.length) {
+    const li = document.createElement('li');
+    li.className = 'pick-empty';
+    li.textContent = '（无，全部场景均入选）';
+    dropUl.appendChild(li);
+  }
+  for (const d of data.discardedScenes) {
+    const li = document.createElement('li');
+    li.innerHTML = `${escapeHtml(sceneName(d.id))}　<span class="hint">时长 ${d.duration}，可选价值 ${d.value}</span>`;
+    const tag = document.createElement('span');
+    tag.className = 'tag tag-discarded';
+    tag.textContent = '舍弃';
+    li.appendChild(tag);
+    dropUl.appendChild(li);
+  }
+  drop.appendChild(dropUl);
+
+  picks.append(sel, drop);
+  frag.appendChild(picks);
+
+  // 演出顺序
+  const hOrder = document.createElement('h3');
+  hOrder.textContent = '演出顺序';
+  frag.appendChild(hOrder);
+  const flow = document.createElement('div');
+  flow.className = 'order-flow';
+  data.order.forEach((id, i) => {
+    if (i > 0) {
+      const arrow = document.createElement('span');
+      arrow.className = 'order-arrow';
+      arrow.textContent = '→';
+      flow.appendChild(arrow);
+    }
+    const chip = document.createElement('span');
+    chip.className = 'order-chip' + (state.scenes.find(x => x.id === id && x.required) ? ' chip-required' : '');
+    chip.textContent = `${i + 1}. ${sceneName(id)}`;
+    flow.appendChild(chip);
+  });
+  frag.appendChild(flow);
+
+  // 换景明细
+  const h = document.createElement('h3');
+  h.textContent = '换景明细';
+  frag.appendChild(h);
+
+  const ul = document.createElement('ul');
+  ul.className = 'step-list';
+  data.steps.forEach((step, i) => {
+    const li = document.createElement('li');
+    const title = document.createElement('div');
+    title.className = 'step-title';
+    if (step.type === 'setup') {
+      title.textContent = `开场布置 →「${sceneName(step.scene)}」`;
+    } else {
+      title.textContent = `换景 ${i}：「${sceneName(step.from)}」→「${sceneName(step.to)}」`;
+    }
+    li.appendChild(title);
+
+    const detail = document.createElement('div');
+    const parts = [];
+    if (step.removed.length) {
+      parts.push(`<span class="prop-del">撤下：${escapeHtml(step.removed.join('、'))}</span>`);
+    }
+    if (step.added.length) {
+      parts.push(`<span class="prop-add">上台：${escapeHtml(step.added.join('、'))}</span>`);
+    }
+    if (!parts.length) parts.push('<span class="prop-none">道具无变化</span>');
+    detail.innerHTML = parts.join('　｜　') + `　<span class="step-count">（${step.count} 次）</span>`;
+    li.appendChild(detail);
+    ul.appendChild(li);
+  });
+  frag.appendChild(ul);
+  return frag;
 }
 
 function resultBlock(data) {
@@ -316,12 +546,20 @@ async function loadPlan() {
   if (!data.ok) { showStatus(data.errors.join('；'), true); return; }
   const p = data.plan;
   state.planId = p.id;
-  state.scenes = p.scenes.map(s => ({ id: s.id, name: s.name, props: s.props.slice() }));
+  state.scenes = p.scenes.map(s => ({
+    id: s.id, name: s.name, props: s.props.slice(),
+    duration: Number(s.duration) || 0,
+    required: Boolean(s.required),
+    value: Number(s.value) || 0,
+  }));
   state.constraints = {
     dependencies: p.constraints.dependencies.map(d => ({ ...d })),
     fixedPositions: p.constraints.fixedPositions.map(f => ({ ...f })),
     forbiddenAdjacencies: p.constraints.forbiddenAdjacencies.map(f => ({ ...f })),
   };
+  state.options = p.options && p.options.mode === 'limited'
+    ? { mode: 'limited', timeLimit: Number(p.options.timeLimit) || 0 }
+    : { mode: 'standard', timeLimit: 60 };
   $('#plan-name').value = p.name;
   $('#result-card').hidden = true;
   renderAll();
@@ -342,6 +580,7 @@ function newPlan() {
   state.planId = null;
   state.scenes = [];
   state.constraints = { dependencies: [], fixedPositions: [], forbiddenAdjacencies: [] };
+  state.options = { mode: 'standard', timeLimit: 60 };
   $('#plan-name').value = '';
   $('#plan-select').value = '';
   $('#result-card').hidden = true;
@@ -354,29 +593,30 @@ function loadSample() {
   newPlan();
   const ids = ['sc1', 'sc2', 'sc3', 'sc4', 'sc5'];
   state.scenes = [
-    { id: ids[0], name: '序幕·市集', props: ['摊位', '灯笼', '布幔'] },
-    { id: ids[1], name: '王宫大殿', props: ['王座', '立柱', '灯笼', '地毯'] },
-    { id: ids[2], name: '森林夜话', props: ['树木', '石头', '月光布'] },
-    { id: ids[3], name: '牢房', props: ['铁栏', '锁链', '石头'] },
-    { id: ids[4], name: '终幕·庆典', props: ['灯笼', '地毯', '花篮', '彩带'] },
+    { id: ids[0], name: '序幕·市集', props: ['摊位', '灯笼', '布幔'], duration: 10, required: true, value: 0 },
+    { id: ids[1], name: '王宫大殿', props: ['王座', '立柱', '灯笼', '地毯'], duration: 12, required: true, value: 0 },
+    { id: ids[2], name: '森林夜话', props: ['树木', '石头', '月光布'], duration: 8, required: false, value: 15 },
+    { id: ids[3], name: '牢房', props: ['铁栏', '锁链', '石头'], duration: 9, required: false, value: 8 },
+    { id: ids[4], name: '终幕·庆典', props: ['灯笼', '地毯', '花篮', '彩带'], duration: 10, required: true, value: 0 },
   ];
   state.constraints = {
     dependencies: [
       { before: ids[0], after: ids[1] },
       { before: ids[2], after: ids[3] },
     ],
-    fixedPositions: [{ sceneId: ids[4], position: 5 }],
+    fixedPositions: [{ sceneId: ids[4], position: 4 }],
     forbiddenAdjacencies: [{ a: ids[1], b: ids[2] }],
   };
-  $('#plan-name').value = '示例剧目';
+  state.options = { mode: 'limited', timeLimit: 40 };
+  $('#plan-name').value = '示例剧目（时长受限）';
   renderAll();
-  showStatus('已载入示例数据，可直接点击「计算最优顺序」');
+  showStatus('已载入示例数据（时长受限模式，上限 40），可直接点击「计算最优顺序」');
 }
 
 /* ================= 事件绑定 ================= */
 $('#btn-add-scene').addEventListener('click', () => {
   if (state.scenes.length >= MAX_SCENES) return;
-  state.scenes.push({ id: uid(), name: '', props: [] });
+  state.scenes.push({ id: uid(), name: '', props: [], duration: 0, required: false, value: 0 });
   renderAll();
 });
 $('#btn-sample').addEventListener('click', loadSample);
@@ -385,6 +625,17 @@ $('#btn-save').addEventListener('click', savePlan);
 $('#btn-load').addEventListener('click', loadPlan);
 $('#btn-delete').addEventListener('click', deletePlan);
 $('#btn-new').addEventListener('click', newPlan);
+
+$$('input[name="mode"]').forEach(radio => {
+  radio.addEventListener('change', () => {
+    state.options.mode = radio.value;
+    renderModeUI();
+  });
+});
+$('#time-limit').addEventListener('input', () => {
+  const v = Number($('#time-limit').value);
+  if (Number.isFinite(v) && v >= 0) state.options.timeLimit = v;
+});
 
 $('#btn-add-dep').addEventListener('click', () => {
   const before = $('#dep-form [data-role="before"]').value;

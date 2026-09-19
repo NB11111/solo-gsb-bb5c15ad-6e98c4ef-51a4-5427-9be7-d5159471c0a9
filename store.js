@@ -34,23 +34,48 @@ function list() {
 }
 
 function get(id) {
-  return readAll().find(p => p.id === id) || null;
+  const plan = readAll().find(p => p.id === id) || null;
+  return plan ? withDefaults(plan) : null;
 }
 
-function create({ name, scenes, constraints }) {
+/** 兼容旧数据：补齐时长受限编排引入的字段。 */
+function withDefaults(plan) {
+  plan.scenes = (plan.scenes || []).map(s => ({
+    id: s.id,
+    name: s.name,
+    props: Array.isArray(s.props) ? s.props : [],
+    duration: Number.isFinite(Number(s.duration)) ? Number(s.duration) : 0,
+    required: Boolean(s.required),
+    value: Number.isFinite(Number(s.value)) ? Number(s.value) : 0,
+  }));
+  plan.options = plan.options && plan.options.mode === 'limited'
+    ? { mode: 'limited', timeLimit: Number(plan.options.timeLimit) || 0 }
+    : { mode: 'standard' };
+  return plan;
+}
+
+function create({ name, scenes, constraints, options }) {
   const plans = readAll();
   const now = new Date().toISOString();
-  const plan = { id: crypto.randomUUID(), name, scenes, constraints, createdAt: now, updatedAt: now };
+  const plan = {
+    id: crypto.randomUUID(), name, scenes, constraints,
+    options: options || { mode: 'standard' },
+    createdAt: now, updatedAt: now,
+  };
   plans.push(plan);
   writeAll(plans);
   return plan;
 }
 
-function update(id, { name, scenes, constraints }) {
+function update(id, { name, scenes, constraints, options }) {
   const plans = readAll();
   const i = plans.findIndex(p => p.id === id);
   if (i === -1) return null;
-  plans[i] = { ...plans[i], name, scenes, constraints, updatedAt: new Date().toISOString() };
+  plans[i] = {
+    ...plans[i], name, scenes, constraints,
+    options: options || { mode: 'standard' },
+    updatedAt: new Date().toISOString(),
+  };
   writeAll(plans);
   return plans[i];
 }

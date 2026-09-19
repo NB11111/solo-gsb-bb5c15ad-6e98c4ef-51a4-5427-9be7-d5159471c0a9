@@ -2,7 +2,7 @@
 
 const path = require('path');
 const express = require('express');
-const { solve, MAX_SCENES, normalizeProps } = require('./solver');
+const { solve, MAX_SCENES, normalizeProps, nonNegNumber } = require('./solver');
 const store = require('./store');
 
 const app = express();
@@ -11,7 +11,7 @@ const PORT = Number(process.env.PORT) || 3000;
 app.use(express.json({ limit: '256kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-/** 校验并规范化 { scenes, constraints }，返回 { errors, scenes, constraints } */
+/** 校验并规范化 { scenes, constraints, options }，返回 { errors, scenes, constraints, options } */
 function validatePayload(body) {
   const errors = [];
   const rawScenes = body && body.scenes;
@@ -28,7 +28,22 @@ function validatePayload(body) {
       if (!name) errors.push(`第 ${i + 1} 个场景缺少名称`);
       if (ids.has(id)) errors.push(`场景 id 重复：${id}`);
       ids.add(id);
-      scenes.push({ id, name, props: normalizeProps(s && s.props) });
+      const duration = nonNegNumber(s && s.duration);
+      if (s && s.duration !== undefined && duration !== Number(s.duration)) {
+        errors.push(`第 ${i + 1} 个场景的时长必须是非负数字`);
+      }
+      const value = nonNegNumber(s && s.value);
+      if (s && s.value !== undefined && value !== Number(s.value)) {
+        errors.push(`第 ${i + 1} 个场景的可选价值必须是非负数字`);
+      }
+      scenes.push({
+        id,
+        name,
+        props: normalizeProps(s && s.props),
+        duration,
+        required: Boolean(s && s.required),
+        value,
+      });
     });
   }
 
@@ -65,15 +80,33 @@ function validatePayload(body) {
     forbiddenAdjacencies.push({ a: f.a, b: f.b });
   }
 
-  return { errors, scenes, constraints: { dependencies, fixedPositions, forbiddenAdjacencies } };
+  // 编排模式（缺省为 standard，兼容旧方案/旧客户端）
+  const rawOptions = (body && body.options) || {};
+  const mode = rawOptions.mode === 'limited' ? 'limited' : 'standard';
+  const options = { mode };
+  if (mode === 'limited') {
+    const tl = Number(rawOptions.timeLimit);
+    if (!Number.isFinite(tl) || tl < 0) {
+      errors.push('整场时长上限必须是非负数字');
+    } else {
+      options.timeLimit = tl;
+    }
+  }
+
+  return {
+    errors,
+    scenes,
+    constraints: { dependencies, fixedPositions, forbiddenAdjacencies },
+    options,
+  };
 }
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 app.post('/api/solve', (req, res) => {
-  const { errors, scenes, constraints } = validatePayload(req.body);
+  const { errors, scenes, constraints, options } = validatePayload(req.body);
   if (errors.length) return res.status(400).json({ ok: false, errors });
-  res.json(solve(scenes, constraints));
+  res.json(solve(scenes, constraints, options));
 });
 
 app.get('/api/plans', (req, res) => {
@@ -83,9 +116,9 @@ app.get('/api/plans', (req, res) => {
 app.post('/api/plans', (req, res) => {
   const name = String((req.body && req.body.name) || '').trim();
   if (!name) return res.status(400).json({ ok: false, errors: ['方案名称不能为空'] });
-  const { errors, scenes, constraints } = validatePayload(req.body);
+  const { errors, scenes, constraints, options } = validatePayload(req.body);
   if (errors.length) return res.status(400).json({ ok: false, errors });
-  const plan = store.create({ name, scenes, constraints });
+  const plan = store.create({ name, scenes, constraints, options });
   res.status(201).json({ ok: true, plan });
 });
 
@@ -98,9 +131,9 @@ app.get('/api/plans/:id', (req, res) => {
 app.put('/api/plans/:id', (req, res) => {
   const name = String((req.body && req.body.name) || '').trim();
   if (!name) return res.status(400).json({ ok: false, errors: ['方案名称不能为空'] });
-  const { errors, scenes, constraints } = validatePayload(req.body);
+  const { errors, scenes, constraints, options } = validatePayload(req.body);
   if (errors.length) return res.status(400).json({ ok: false, errors });
-  const plan = store.update(req.params.id, { name, scenes, constraints });
+  const plan = store.update(req.params.id, { name, scenes, constraints, options });
   if (!plan) return res.status(404).json({ ok: false, errors: ['方案不存在'] });
   res.json({ ok: true, plan });
 });

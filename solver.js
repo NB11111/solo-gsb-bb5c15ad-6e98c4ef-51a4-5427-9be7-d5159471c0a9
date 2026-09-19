@@ -3,6 +3,17 @@
 /**
  * 求解器：在全部约束下，求道具增减次数最少的场景演出顺序。
  *
+ * 支持两种编排模式（options.mode）：
+ *  - standard（默认）：全部场景必须参演，求道具增减次数最少的顺序。
+ *  - limited（时长受限编排）：从场景中选择包含全部必演场景（required）的子集，
+ *    总时长不超过 options.timeLimit，未入选场景不参与任何约束，固定序位按入选
+ *    后的演出序列计算。目标为先最大化入选可选场景的价值总和，再最小化道具增减。
+ *
+ * 场景字段：{ id, name, props, duration?, required?, value? }
+ *  - duration: 场景时长（非负数，默认 0）
+ *  - required: 是否必演（布尔，默认 false）
+ *  - value:    可选场景的价值（非负数，默认 0；仅可选场景计入总价值）
+ *
  * 约束类型：
  *  - dependencies:        [{ before, after }]   before 必须排在 after 之前
  *  - fixedPositions:      [{ sceneId, position }] 场景固定在第 position 位（1 起）
@@ -11,10 +22,17 @@
  * 目标函数：开场布置道具数 + 每次换景的（撤下数 + 上台数）之和。
  *
  * 算法：n <= 12，使用子集 DP（Held-Karp 风格），状态 (已排集合, 末尾场景)，
- * 复杂度 O(2^n * n^2)，最坏约 70 万状态，毫秒级完成。
+ * 复杂度 O(2^n * n^2)，最坏约 70 万状态，毫秒级完成。时长受限模式枚举全部
+ * 候选子集（必演掩码的超集且总时长不超限）并复用同一块 DP 内存，总工作量
+ * 约 O(3^n * n)，12 个场景仍在毫秒~数百毫秒级。
  */
 
 const MAX_SCENES = 12;
+
+function nonNegNumber(v) {
+  const x = Number(v);
+  return Number.isFinite(x) && x >= 0 ? x : 0;
+}
 
 function normalizeProps(props) {
   const out = [];
@@ -41,8 +59,11 @@ function buildModel(scenes, constraints) {
   const index = new Map();
   scenes.forEach((s, i) => index.set(s.id, i));
   const propSets = scenes.map(s => new Set(normalizeProps(s.props)));
+  const durations = scenes.map(s => nonNegNumber(s.duration));
+  const required = scenes.map(s => Boolean(s && s.required));
+  const values = scenes.map(s => (s && s.required ? 0 : nonNegNumber(s.value)));
 
-  // prereq[i]: 必须排在 i 之前的场景位掩码
+  // prereq[i]: 必须排在 i 之前的场景位掩码（时长受限模式下仅统计同时入选的前置）
   const prereq = new Array(n).fill(0);
   for (const d of (constraints && constraints.dependencies) || []) {
     const a = index.get(d.before);
@@ -85,7 +106,10 @@ function buildModel(scenes, constraints) {
   }
   const setupCost = propSets.map(s => s.size);
 
-  return { n, propSets, prereq, fixedPosOfScene, sceneAtPos, bad, cost, setupCost };
+  return {
+    n, propSets, durations, required, values,
+    prereq, fixedPosOfScene, sceneAtPos, bad, cost, setupCost,
+  };
 }
 
 /** 子集 DP。返回 { cost, orderIdx } 或 null（无解）。 */
@@ -164,6 +188,301 @@ function runDP(model) {
   }
   orderIdx.reverse();
   return { cost: best, orderIdx };
+}
+
+/**
+ * 子集 DP：仅安排 subset（位掩码）中的场景。
+ *
+ * 与 runDP 的语义差别（对应"未入选场景不参与约束、固定序位按入选序列计算"）：
+ *  - 依赖：前置场景未入选时忽略，即只要求 (prereq[j] & subset) 已排入；
+ *  - 固定序位：按入选后的演出序列（popcount）逐场景校验，同一序位固定了两个
+ *    入选场景时本函数必然返回 null（无需 sceneAtPos 槽位强推）；
+ *  - 禁止相邻：只可能由两个入选场景触发。
+ *
+ * 为枚举大量候选子集，dpCost/parent/gen 为跨子集复用的共享缓冲区，用
+ * generation 标记区分不同子集，避免重复分配。
+ */
+function runSubsetDP(model, subset, buf, genNo) {
+  const { n, prereq, fixedPosOfScene, bad, cost, setupCost } = model;
+  const { dpCost, dpParent, gen } = buf;
+  if (subset === 0) return { cost: 0, orderIdx: [] };
+
+  const idx = (m, j) => m * n + j;
+  const fixedOK = (j, pos) => fixedPosOfScene[j] === -1 || fixedPosOfScene[j] === pos;
+
+  for (let j = 0; j < n; j++) {
+    const bit = 1 << j;
+    if (!(subset & bit)) continue;
+    if (prereq[j] & subset) continue;   // 入选的前置依赖不能排首位（未入选的忽略）
+    if (!fixedOK(j, 0)) continue;
+    const k = idx(bit, j);
+    gen[k] = genNo;
+    dpCost[k] = setupCost[j];
+    dpParent[k] = -1;
+  }
+
+  // 数值升序遍历子集：严格子掩码必小于超集，天然满足拓扑序
+  for (let m = 1; m <= subset; m++) {
+    if ((m & subset) !== m) continue;
+    const pos = popcount(m);
+    if (pos === popcount(subset)) continue;
+    for (let last = 0; last < n; last++) {
+      const kLast = idx(m, last);
+      if (gen[kLast] !== genNo) continue;
+      const cur = dpCost[kLast];
+      for (let j = 0; j < n; j++) {
+        const bit = 1 << j;
+        if (!(subset & bit) || (m & bit)) continue;
+        if (prereq[j] & subset & ~m) continue; // 入选的前置必须已排入
+        if (!fixedOK(j, pos)) continue;
+        if (bad[last][j]) continue;
+        const nm = m | bit;
+        const k = idx(nm, j);
+        const nc = cur + cost[last][j];
+        if (gen[k] !== genNo || nc < dpCost[k]) {
+          gen[k] = genNo;
+          dpCost[k] = nc;
+          dpParent[k] = last;
+        }
+      }
+    }
+  }
+
+  let best = Infinity;
+  let bestLast = -1;
+  for (let last = 0; last < n; last++) {
+    const k = idx(subset, last);
+    if (gen[k] === genNo && dpCost[k] < best) {
+      best = dpCost[k];
+      bestLast = last;
+    }
+  }
+  if (bestLast === -1) return null;
+
+  const orderIdx = [];
+  let m = subset;
+  let last = bestLast;
+  while (last !== -1) {
+    orderIdx.push(last);
+    const k = idx(m, last);
+    const p = dpParent[k];
+    m ^= (1 << last);
+    last = p;
+  }
+  orderIdx.reverse();
+  return { cost: best, orderIdx };
+}
+
+/** 两个定长下标序列的字典序比较：a < b 返回 -1；更短且为前缀者更小。 */
+function compareLex(a, b) {
+  const len = Math.min(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+  }
+  return a.length === b.length ? 0 : (a.length < b.length ? -1 : 1);
+}
+
+/**
+ * 时长受限编排求解：
+ * 枚举所有"包含全部必演、总时长不超限"的候选子集，对每个可行子集求道具增减
+ * 最小顺序，再按 (可选价值总和 ↓, 道具增减 ↓, 顺序字典序 ↑) 选出全局最优。
+ */
+function solveLimited(scenes, constraints, options, model) {
+  const m = model || buildModel(scenes, constraints);
+  const n = m.n;
+  const timeLimit = nonNegNumber(options && options.timeLimit);
+  const fullMask = (1 << n) - 1;
+
+  const requiredMask = m.required.reduce((acc, r, i) => acc | (r ? (1 << i) : 0), 0);
+
+  // 各掩码的总时长 / 可选价值（按最低位递推）
+  const durSum = new Float64Array(1 << n);
+  const valSum = new Float64Array(1 << n);
+  for (let mask = 1; mask <= fullMask; mask++) {
+    const bit = mask & -mask;
+    const j = bit.toString(2).length - 1;
+    durSum[mask] = durSum[mask ^ bit] + m.durations[j];
+    valSum[mask] = valSum[mask ^ bit] + m.values[j];
+  }
+
+  // 必演场景自身超时：任何可行子集都不可能满足，直接判定无解
+  if (durSum[requiredMask] > timeLimit) {
+    return {
+      ok: false,
+      reason: 'required-overtime',
+      message: `必演场景总时长 ${durSum[requiredMask]} 已超过整场时长上限 ${timeLimit}，无法编排。`,
+      requiredDuration: durSum[requiredMask],
+      timeLimit,
+    };
+  }
+
+  const size = 1 << n;
+  const buf = {
+    dpCost: new Float64Array(size * n),
+    dpParent: new Int8Array(size * n),
+    gen: new Int32Array(size * n),
+  };
+
+  let best = null; // { mask, value, cost, orderIdx }
+  let genNo = 0;
+
+  // 候选子集 = requiredMask 的超集，且总时长不超过上限
+  const optionalMask = fullMask ^ requiredMask;
+  for (let opt = optionalMask;; opt = (opt - 1) & optionalMask) {
+    const mask = opt | requiredMask;
+    if (durSum[mask] <= timeLimit) {
+      const res = runSubsetDP(m, mask, buf, ++genNo);
+      if (res) {
+        const cand = {
+          mask,
+          value: valSum[mask],
+          cost: res.cost,
+          orderIdx: res.orderIdx,
+        };
+        if (!best ||
+            cand.value > best.value ||
+            (cand.value === best.value && cand.cost < best.cost) ||
+            (cand.value === best.value && cand.cost === best.cost &&
+             compareLex(cand.orderIdx, best.orderIdx) < 0)) {
+          best = cand;
+        }
+      }
+    }
+    if (opt === 0) break;
+  }
+
+  if (!best) {
+    return limitedInfeasible(scenes, constraints, m, requiredMask, {
+      timeLimit,
+      requiredDuration: durSum[requiredMask],
+    });
+  }
+
+  const selected = best.orderIdx;
+  const selectedSet = new Set(selected);
+  const discarded = [];
+  for (let i = 0; i < n; i++) if (!selectedSet.has(i)) discarded.push(i);
+  // 舍弃顺序按原录入顺序展示，保证确定
+  discarded.sort((a, b) => a - b);
+
+  return {
+    ok: true,
+    mode: 'limited',
+    order: selected.map(i => scenes[i].id),
+    selectedScenes: selected.map(i => scenes[i].id),
+    discardedScenes: discarded.map(i => ({
+      id: scenes[i].id,
+      required: Boolean(m.required[i]),
+      duration: m.durations[i],
+      value: m.values[i],
+    })),
+    totalValue: best.value,
+    totalCost: best.cost,
+    usedDuration: durSum[best.mask],
+    timeLimit,
+    remainingDuration: timeLimit - durSum[best.mask],
+    steps: buildSteps(scenes, m, selected),
+  };
+}
+
+/**
+ * 必演子集本身排不出可行顺序时给出冲突提示（可选场景无法解除必演内部冲突）。
+ * @param extra { timeLimit, requiredDuration } 用于判断固定序位能否由可选场景补位
+ */
+function limitedInfeasible(scenes, constraints, model, requiredMask, extra) {
+  const n = scenes.length;
+  const reqScenes = [];
+  const reqIdx = new Set();
+  scenes.forEach((s, i) => {
+    if (requiredMask & (1 << i)) { reqIdx.add(i); reqScenes.push(s); }
+  });
+
+  const has = (id) => {
+    const i = scenes.findIndex(s => s.id === id);
+    return i !== -1 && reqIdx.has(i);
+  };
+  const reqConstraints = {
+    dependencies: ((constraints && constraints.dependencies) || [])
+      .filter(d => has(d.before) && has(d.after)),
+    fixedPositions: ((constraints && constraints.fixedPositions) || [])
+      .filter(f => has(f.sceneId)),
+    forbiddenAdjacencies: ((constraints && constraints.forbiddenAdjacencies) || [])
+      .filter(f => has(f.a) && has(f.b)),
+  };
+
+  // 必演场景固定在超出必演数量的序位上时，必须有足够的可选场景在时长上限内补位。
+  const maxPos = reqConstraints.fixedPositions.reduce(
+    (mx, f) => Math.max(mx, Number(f.position)), 0);
+  const need = maxPos - reqScenes.length;
+  if (need > 0) {
+    const slack = extra.timeLimit - extra.requiredDuration;
+    const optDurations = [];
+    for (let i = 0; i < n; i++) if (!reqIdx.has(i)) optDurations.push(model.durations[i]);
+    optDurations.sort((a, b) => a - b);
+    let cheapest = 0;
+    for (let i = 0; i < need; i++) {
+      if (i >= optDurations.length) { cheapest = Infinity; break; }
+      cheapest += optDurations[i];
+    }
+    if (cheapest > slack) {
+      const f = reqConstraints.fixedPositions.find(x => Number(x.position) === maxPos);
+      return {
+        ok: false,
+        reason: 'no-feasible-arrangement',
+        message: `没有可行编排：必演场景共 ${reqScenes.length} 个，而「${
+          scenes.find(s => s.id === f.sceneId).name}」要求固定在第 ${maxPos} 位，` +
+          `时长上限内也没有足够的可选场景补位。`,
+        conflict: describeConstraint(scenes, 'fixedPosition', f),
+      };
+    }
+  }
+
+  const reqModel = buildModel(reqScenes, reqConstraints);
+  if (runDP(reqModel) === null) {
+    return {
+      ok: false,
+      reason: 'no-feasible-arrangement',
+      message: '包含全部必演场景也找不到满足依赖、固定序位与禁止相邻约束的可行编排（可适当放宽必演场景约束或时长上限）：',
+      conflict: analyzeConflict(reqScenes, reqConstraints),
+    };
+  }
+
+  return {
+    ok: false,
+    reason: 'no-feasible-arrangement',
+    message: '没有可行编排：在给定时长上限内，可选场景无法与必演场景共同排出满足全部约束的序列，可适当放宽时长上限或必演场景的约束。',
+    conflict: { type: 'time-limit', constraints: [] },
+  };
+}
+
+/** 根据入选顺序构造开场布置与逐次换景明细。 */
+function buildSteps(scenes, model, orderIdx) {
+  const steps = [];
+  if (orderIdx.length === 0) return steps;
+  const first = orderIdx[0];
+  const firstProps = [...model.propSets[first]];
+  steps.push({
+    type: 'setup',
+    scene: scenes[first].id,
+    added: firstProps,
+    removed: [],
+    count: firstProps.length,
+  });
+  for (let k = 1; k < orderIdx.length; k++) {
+    const a = orderIdx[k - 1];
+    const b = orderIdx[k];
+    const removed = [...model.propSets[a]].filter(p => !model.propSets[b].has(p));
+    const added = [...model.propSets[b]].filter(p => !model.propSets[a].has(p));
+    steps.push({
+      type: 'transition',
+      from: scenes[a].id,
+      to: scenes[b].id,
+      removed,
+      added,
+      count: removed.length + added.length,
+    });
+  }
+  return steps;
 }
 
 /** 检测依赖环，返回构成环的依赖约束数组，无环返回 null。 */
@@ -270,46 +589,30 @@ function analyzeConflict(scenes, constraints) {
 
 /**
  * 求解入口。
- * @returns 有解：{ ok:true, order, totalCost, steps }；无解：{ ok:false, conflict }
+ * @param options { mode?: 'standard'|'limited', timeLimit?: number }
+ * @returns 有解：{ ok:true, order, totalCost, steps, ... }；
+ *          无解：{ ok:false, conflict } 或 { ok:false, reason, message, ... }
  */
-function solve(scenes, constraints) {
+function solve(scenes, constraints, options) {
+  const mode = options && options.mode === 'limited' ? 'limited' : 'standard';
   const model = buildModel(scenes, constraints);
+
+  if (mode === 'limited') {
+    return solveLimited(scenes, constraints, options || {}, model);
+  }
+
   const res = runDP(model);
   if (!res) {
     return { ok: false, conflict: analyzeConflict(scenes, constraints || {}) };
   }
 
-  const steps = [];
-  const first = res.orderIdx[0];
-  const firstProps = [...model.propSets[first]];
-  steps.push({
-    type: 'setup',
-    scene: scenes[first].id,
-    added: firstProps,
-    removed: [],
-    count: firstProps.length,
-  });
-  for (let k = 1; k < res.orderIdx.length; k++) {
-    const a = res.orderIdx[k - 1];
-    const b = res.orderIdx[k];
-    const removed = [...model.propSets[a]].filter(p => !model.propSets[b].has(p));
-    const added = [...model.propSets[b]].filter(p => !model.propSets[a].has(p));
-    steps.push({
-      type: 'transition',
-      from: scenes[a].id,
-      to: scenes[b].id,
-      removed,
-      added,
-      count: removed.length + added.length,
-    });
-  }
-
   return {
     ok: true,
+    mode: 'standard',
     order: res.orderIdx.map(i => scenes[i].id),
     totalCost: res.cost,
-    steps,
+    steps: buildSteps(scenes, model, res.orderIdx),
   };
 }
 
-module.exports = { solve, MAX_SCENES, normalizeProps };
+module.exports = { solve, MAX_SCENES, normalizeProps, nonNegNumber };

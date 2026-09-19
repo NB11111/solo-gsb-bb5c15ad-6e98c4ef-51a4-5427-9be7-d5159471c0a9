@@ -9,7 +9,7 @@
 <body>
   <header>
     <h1>🎭 舞台换景顺序优化</h1>
-    <p>录入场景与道具，设置约束，计算道具增减次数最少的演出顺序（最多 12 个场景）</p>
+    <p>录入场景与道具，设置约束，计算道具增减次数最少的演出顺序（最多 12 个场景）；支持时长受限编排</p>
   </header>
 
   <main>
@@ -23,7 +23,15 @@
       </div>
       <table id="scene-table">
         <thead>
-          <tr><th class="col-idx">#</th><th>场景名称</th><th>道具（用逗号分隔）</th><th class="col-op"></th></tr>
+          <tr>
+            <th class="col-idx">#</th>
+            <th>场景名称</th>
+            <th>道具（用逗号分隔）</th>
+            <th class="col-duration">时长</th>
+            <th class="col-required">必演</th>
+            <th class="col-value">可选价值</th>
+            <th class="col-op"></th>
+          </tr>
         </thead>
         <tbody id="scene-tbody"></tbody>
       </table>
@@ -31,7 +39,22 @@
     </section>
 
     <section class="card">
-      <h2>2. 约束设置</h2>
+      <h2>2. 编排模式与约束设置</h2>
+      <div class="mode-box">
+        <label class="mode-option">
+          <input type="radio" name="mode" value="standard" checked>
+          <span><strong>标准编排</strong><span class="hint">　全部场景参演，仅最小化道具增减</span></span>
+        </label>
+        <label class="mode-option">
+          <input type="radio" name="mode" value="limited">
+          <span><strong>时长受限编排</strong><span class="hint">　含全部必演，先最大化可选价值再最小化道具增减</span></span>
+        </label>
+        <div class="mode-limit" id="mode-limit" hidden>
+          <label for="time-limit">整场时长上限：</label>
+          <input type="number" id="time-limit" min="0" step="1" value="60">
+          <span class="hint">未入选场景不参与约束，固定序位按入选后的演出序列计算</span>
+        </div>
+      </div>
       <div class="constraint-groups">
         <div class="constraint-group">
           <h3>前后依赖 <span class="hint">A 必须排在 B 之前</span></h3>
@@ -46,7 +69,7 @@
         </div>
 
         <div class="constraint-group">
-          <h3>固定序位 <span class="hint">某场景必须排在第 N 位</span></h3>
+          <h3>固定序位 <span class="hint">某场景必须排在入选序列第 N 位</span></h3>
           <div class="constraint-form" id="fixed-form">
             <select data-role="scene"></select>
             <span>固定在第</span>
